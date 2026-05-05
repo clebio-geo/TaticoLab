@@ -1,0 +1,1265 @@
+import sqlite3
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+
+DB_NAME = "gestao_3d.db"
+
+
+class Database:
+    def __init__(self, db_name):
+        self.conn = sqlite3.connect(db_name)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self.create_tables()
+        self.update_schema()
+
+    def create_tables(self):
+        cursor = self.conn.cursor()
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS impressoras (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            potencia_w REAL NOT NULL,
+            custo_aquisicao REAL DEFAULT 0,
+            vida_util_horas REAL DEFAULT 0,
+            manutencao_mensal REAL DEFAULT 0
+        )
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS materiais (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            categoria TEXT,
+            fabricante TEXT,
+            tipo TEXT,
+            cor TEXT,
+            peso_rolo_g REAL DEFAULT 0,
+            valor_rolo REAL DEFAULT 0,
+            custo_unitario REAL DEFAULT 0,
+            unidade TEXT
+        )
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS produtos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            material_id INTEGER NOT NULL,
+            impressora_id INTEGER NOT NULL,
+            peso_peca_g REAL NOT NULL,
+            tempo_impressao_h REAL NOT NULL,
+            custo_insumos_extra REAL DEFAULT 0,
+            custo_mao_obra REAL DEFAULT 0,
+            percentual_falha REAL DEFAULT 0,
+            margem_lucro REAL DEFAULT 0,
+            preco_sugerido REAL DEFAULT 0,
+            FOREIGN KEY(material_id) REFERENCES materiais(id),
+            FOREIGN KEY(impressora_id) REFERENCES impressoras(id)
+        )
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vendas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            produto_id INTEGER NOT NULL,
+            quantidade INTEGER NOT NULL,
+            valor_unitario REAL NOT NULL,
+            valor_total REAL NOT NULL,
+            custo_unitario_produto REAL DEFAULT 0,
+            custo_total_venda REAL DEFAULT 0,
+            lucro_total REAL DEFAULT 0,
+            data_venda TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(produto_id) REFERENCES produtos(id)
+        )
+        """)
+
+        self.conn.commit()
+
+    def update_schema(self):
+        colunas_materiais = {
+            "categoria": "TEXT",
+            "fabricante": "TEXT",
+            "tipo": "TEXT",
+            "cor": "TEXT",
+            "peso_rolo_g": "REAL DEFAULT 0",
+            "valor_rolo": "REAL DEFAULT 0",
+            "custo_unitario": "REAL DEFAULT 0",
+            "unidade": "TEXT"
+        }
+
+        colunas_vendas = {
+            "custo_unitario_produto": "REAL DEFAULT 0",
+            "custo_total_venda": "REAL DEFAULT 0",
+            "lucro_total": "REAL DEFAULT 0"
+        }
+
+        existentes_materiais = self.execute("PRAGMA table_info(materiais)", fetch=True)
+        nomes_materiais = [col["name"] for col in existentes_materiais]
+
+        for coluna, tipo in colunas_materiais.items():
+            if coluna not in nomes_materiais:
+                self.execute(f"ALTER TABLE materiais ADD COLUMN {coluna} {tipo}")
+
+        existentes_vendas = self.execute("PRAGMA table_info(vendas)", fetch=True)
+        nomes_vendas = [col["name"] for col in existentes_vendas]
+
+        for coluna, tipo in colunas_vendas.items():
+            if coluna not in nomes_vendas:
+                self.execute(f"ALTER TABLE vendas ADD COLUMN {coluna} {tipo}")
+
+    def execute(self, query, params=(), fetch=False, fetchone=False):
+        cursor = self.conn.cursor()
+        cursor.execute(query, params)
+        self.conn.commit()
+
+        if fetchone:
+            return cursor.fetchone()
+        if fetch:
+            return cursor.fetchall()
+        return None
+
+
+class Sistema3DApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Gestão de Impressão 3D")
+        self.root.geometry("1280x800")
+
+        self.db = Database(DB_NAME)
+
+        self.tarifa_energia = tk.DoubleVar(value=1.10)
+        self.percentual_custos_fixos = tk.DoubleVar(value=10.0)
+
+        self.impressora_editando_id = None
+        self.material_editando_id = None
+        self.produto_editando_id = None
+        self.venda_editando_id = None
+
+        self.criar_interface()
+
+    def criar_interface(self):
+        topo = ttk.Frame(self.root, padding=10)
+        topo.pack(fill="x")
+
+        ttk.Label(topo, text="Tarifa de energia (R$/kWh):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        ttk.Entry(topo, textvariable=self.tarifa_energia, width=12).grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(topo, text="Custos fixos adicionais (%):").grid(row=0, column=2, padx=5, pady=5, sticky="w")
+        ttk.Entry(topo, textvariable=self.percentual_custos_fixos, width=12).grid(row=0, column=3, padx=5, pady=5)
+
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.tab_impressoras = ttk.Frame(notebook)
+        self.tab_materiais = ttk.Frame(notebook)
+        self.tab_produtos = ttk.Frame(notebook)
+        self.tab_vendas = ttk.Frame(notebook)
+        self.tab_relatorio = ttk.Frame(notebook)
+
+        notebook.add(self.tab_impressoras, text="Impressoras")
+        notebook.add(self.tab_materiais, text="Materiais")
+        notebook.add(self.tab_produtos, text="Produtos")
+        notebook.add(self.tab_vendas, text="Vendas")
+        notebook.add(self.tab_relatorio, text="Relatórios")
+
+        self.montar_tab_impressoras()
+        self.montar_tab_materiais()
+        self.montar_tab_produtos()
+        self.montar_tab_vendas()
+        self.montar_tab_relatorio()
+
+        self.atualizar_listas()
+
+    def montar_tab_impressoras(self):
+        frame = ttk.LabelFrame(self.tab_impressoras, text="Cadastrar impressora", padding=10)
+        frame.pack(fill="x", padx=10, pady=10)
+
+        self.imp_nome = tk.StringVar()
+        self.imp_potencia = tk.DoubleVar()
+        self.imp_custo = tk.DoubleVar()
+        self.imp_vida = tk.DoubleVar()
+        self.imp_manut = tk.DoubleVar()
+
+        campos = [
+            ("Nome", self.imp_nome),
+            ("Potência (W)", self.imp_potencia),
+            ("Custo aquisição (R$)", self.imp_custo),
+            ("Vida útil (horas)", self.imp_vida),
+            ("Manutenção mensal (R$)", self.imp_manut)
+        ]
+
+        for i, (texto, var) in enumerate(campos):
+            ttk.Label(frame, text=texto).grid(row=i, column=0, sticky="w", padx=5, pady=5)
+            ttk.Entry(frame, textvariable=var, width=30).grid(row=i, column=1, padx=5, pady=5)
+
+        barra_botoes = ttk.Frame(frame)
+        barra_botoes.grid(row=5, column=0, columnspan=2, pady=10)
+
+        self.btn_salvar_impressora = ttk.Button(barra_botoes, text="Salvar impressora", command=self.salvar_impressora)
+        self.btn_salvar_impressora.pack(side="left", padx=5)
+        ttk.Button(barra_botoes, text="Editar selecionada", command=self.carregar_impressora_para_edicao).pack(side="left", padx=5)
+        ttk.Button(barra_botoes, text="Excluir selecionada", command=self.excluir_impressora).pack(side="left", padx=5)
+        ttk.Button(barra_botoes, text="Cancelar edição", command=self.cancelar_edicao_impressora).pack(side="left", padx=5)
+
+        self.tree_impressoras = ttk.Treeview(
+            self.tab_impressoras,
+            columns=("id", "nome", "potencia", "custo", "vida", "manut"),
+            show="headings"
+        )
+        for col, txt, w in [
+            ("id", "ID", 60),
+            ("nome", "Nome", 240),
+            ("potencia", "Potência (W)", 120),
+            ("custo", "Custo (R$)", 120),
+            ("vida", "Vida útil (h)", 120),
+            ("manut", "Manut. mensal (R$)", 140)
+        ]:
+            self.tree_impressoras.heading(col, text=txt)
+            self.tree_impressoras.column(col, width=w)
+
+        self.tree_impressoras.pack(fill="both", expand=True, padx=10, pady=10)
+        self.tree_impressoras.bind("<Double-1>", lambda e: self.carregar_impressora_para_edicao())
+
+    def montar_tab_materiais(self):
+        frame = ttk.LabelFrame(self.tab_materiais, text="Cadastrar material", padding=10)
+        frame.pack(fill="x", padx=10, pady=10)
+
+        self.mat_nome = tk.StringVar()
+        self.mat_categoria = tk.StringVar()
+        self.mat_fabricante = tk.StringVar()
+        self.mat_tipo = tk.StringVar()
+        self.mat_cor = tk.StringVar()
+        self.mat_peso_rolo = tk.DoubleVar()
+        self.mat_valor_rolo = tk.DoubleVar()
+        self.mat_custo_unitario = tk.DoubleVar()
+        self.mat_unidade = tk.StringVar()
+
+        ttk.Label(frame, text="Nome").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.mat_nome, width=30).grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Categoria").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.cmb_categoria = ttk.Combobox(
+            frame,
+            textvariable=self.mat_categoria,
+            state="readonly",
+            values=["Filamentos", "Outros Insumos"],
+            width=27
+        )
+        self.cmb_categoria.grid(row=1, column=1, padx=5, pady=5)
+        self.cmb_categoria.bind("<<ComboboxSelected>>", self.alternar_campos_material)
+
+        self.frame_filamento = ttk.LabelFrame(frame, text="Dados do filamento", padding=10)
+        self.frame_filamento.grid(row=2, column=0, columnspan=2, sticky="ew", padx=5, pady=10)
+
+        ttk.Label(self.frame_filamento, text="Fabricante").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(self.frame_filamento, textvariable=self.mat_fabricante, width=30).grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(self.frame_filamento, text="Tipo").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.cmb_tipo = ttk.Combobox(
+            self.frame_filamento,
+            textvariable=self.mat_tipo,
+            state="readonly",
+            values=["PLA", "PETG", "ABS", "TPU", "ASA", "Nylon", "Resina"],
+            width=27
+        )
+        self.cmb_tipo.grid(row=1, column=1, padx=5, pady=5)
+
+        ttk.Label(self.frame_filamento, text="Cor").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(self.frame_filamento, textvariable=self.mat_cor, width=30).grid(row=2, column=1, padx=5, pady=5)
+
+        self.lbl_peso_rolo = ttk.Label(frame, text="Peso do rolo (g)")
+        self.lbl_peso_rolo.grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.entry_peso_rolo = ttk.Entry(frame, textvariable=self.mat_peso_rolo, width=30)
+        self.entry_peso_rolo.grid(row=3, column=1, padx=5, pady=5)
+
+        self.lbl_valor_rolo = ttk.Label(frame, text="Valor do rolo (R$)")
+        self.lbl_valor_rolo.grid(row=4, column=0, sticky="w", padx=5, pady=5)
+        self.entry_valor_rolo = ttk.Entry(frame, textvariable=self.mat_valor_rolo, width=30)
+        self.entry_valor_rolo.grid(row=4, column=1, padx=5, pady=5)
+
+        self.lbl_custo_unitario = ttk.Label(frame, text="Custo unitário (R$)")
+        self.entry_custo_unitario = ttk.Entry(frame, textvariable=self.mat_custo_unitario, width=30)
+
+        self.lbl_unidade = ttk.Label(frame, text="Unidade")
+        self.entry_unidade = ttk.Entry(frame, textvariable=self.mat_unidade, width=30)
+
+        barra_botoes = ttk.Frame(frame)
+        barra_botoes.grid(row=7, column=0, columnspan=2, pady=10)
+        self.btn_salvar_material = ttk.Button(barra_botoes, text="Salvar material", command=self.salvar_material)
+        self.btn_salvar_material.pack(side="left", padx=5)
+        ttk.Button(barra_botoes, text="Editar selecionado", command=self.carregar_material_para_edicao).pack(side="left", padx=5)
+        ttk.Button(barra_botoes, text="Excluir selecionado", command=self.excluir_material).pack(side="left", padx=5)
+        ttk.Button(barra_botoes, text="Cancelar edição", command=self.cancelar_edicao_material).pack(side="left", padx=5)
+
+        self.tree_materiais = ttk.Treeview(
+            self.tab_materiais,
+            columns=("id", "nome", "categoria", "fabricante", "tipo", "cor", "custo"),
+            show="headings"
+        )
+        for col, txt, w in [
+            ("id", "ID", 50),
+            ("nome", "Nome", 180),
+            ("categoria", "Categoria", 130),
+            ("fabricante", "Fabricante", 140),
+            ("tipo", "Tipo", 100),
+            ("cor", "Cor", 100),
+            ("custo", "Custo", 140),
+        ]:
+            self.tree_materiais.heading(col, text=txt)
+            self.tree_materiais.column(col, width=w)
+
+        self.tree_materiais.pack(fill="both", expand=True, padx=10, pady=10)
+        self.tree_materiais.bind("<Double-1>", lambda e: self.carregar_material_para_edicao())
+
+        self.alternar_campos_material()
+
+    def montar_tab_produtos(self):
+        frame = ttk.LabelFrame(self.tab_produtos, text="Cadastrar produto", padding=10)
+        frame.pack(fill="x", padx=10, pady=10)
+
+        self.prod_nome = tk.StringVar()
+        self.prod_material = ttk.Combobox(frame, state="readonly", width=40)
+        self.prod_impressora = ttk.Combobox(frame, state="readonly", width=40)
+        self.prod_peso = tk.DoubleVar()
+        self.prod_tempo = tk.DoubleVar()
+        self.prod_insumos = tk.DoubleVar()
+        self.prod_mao_obra = tk.DoubleVar()
+        self.prod_falha = tk.DoubleVar(value=5.0)
+        self.prod_margem = tk.DoubleVar(value=30.0)
+
+        ttk.Label(frame, text="Nome do produto").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.prod_nome, width=35).grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Filamento").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.prod_material.grid(row=1, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Impressora").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.prod_impressora.grid(row=2, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Peso da peça (g)").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.prod_peso, width=35).grid(row=3, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Tempo de impressão (h)").grid(row=4, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.prod_tempo, width=35).grid(row=4, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Insumos extras (R$)").grid(row=5, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.prod_insumos, width=35).grid(row=5, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Mão de obra (R$)").grid(row=6, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.prod_mao_obra, width=35).grid(row=6, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="% perda/falha").grid(row=7, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.prod_falha, width=35).grid(row=7, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="% margem de lucro").grid(row=8, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.prod_margem, width=35).grid(row=8, column=1, padx=5, pady=5)
+
+        botoes = ttk.Frame(frame)
+        botoes.grid(row=9, column=0, columnspan=2, pady=10)
+
+        ttk.Button(botoes, text="Calcular preço", command=self.calcular_preco_produto).pack(side="left", padx=5)
+        self.btn_salvar_produto = ttk.Button(botoes, text="Salvar produto", command=self.salvar_produto)
+        self.btn_salvar_produto.pack(side="left", padx=5)
+        ttk.Button(botoes, text="Editar selecionado", command=self.carregar_produto_para_edicao).pack(side="left", padx=5)
+        ttk.Button(botoes, text="Excluir selecionado", command=self.excluir_produto).pack(side="left", padx=5)
+        ttk.Button(botoes, text="Cancelar edição", command=self.cancelar_edicao_produto).pack(side="left", padx=5)
+
+        self.lbl_preco = ttk.Label(frame, text="Preço sugerido: R$ 0,00", font=("Arial", 11, "bold"))
+        self.lbl_preco.grid(row=10, column=0, columnspan=2, pady=5)
+
+        self.tree_produtos = ttk.Treeview(
+            self.tab_produtos,
+            columns=("id", "nome", "preco", "peso", "tempo"),
+            show="headings"
+        )
+        for col, txt, w in [
+            ("id", "ID", 60),
+            ("nome", "Produto", 260),
+            ("preco", "Preço sugerido (R$)", 150),
+            ("peso", "Peso (g)", 100),
+            ("tempo", "Tempo (h)", 100),
+        ]:
+            self.tree_produtos.heading(col, text=txt)
+            self.tree_produtos.column(col, width=w)
+
+        self.tree_produtos.pack(fill="both", expand=True, padx=10, pady=10)
+        self.tree_produtos.bind("<Double-1>", lambda e: self.carregar_produto_para_edicao())
+
+    def montar_tab_vendas(self):
+        frame = ttk.LabelFrame(self.tab_vendas, text="Registrar venda", padding=10)
+        frame.pack(fill="x", padx=10, pady=10)
+
+        self.venda_produto = ttk.Combobox(frame, state="readonly", width=45)
+        self.venda_quantidade = tk.IntVar(value=1)
+        self.venda_valor_unitario = tk.DoubleVar()
+
+        ttk.Label(frame, text="Produto").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.venda_produto.grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Quantidade").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.venda_quantidade, width=20).grid(row=1, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Valor unitário vendido (R$)").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        ttk.Entry(frame, textvariable=self.venda_valor_unitario, width=20).grid(row=2, column=1, padx=5, pady=5)
+
+        barra_botoes = ttk.Frame(frame)
+        barra_botoes.grid(row=3, column=0, columnspan=2, pady=10)
+        self.btn_salvar_venda = ttk.Button(barra_botoes, text="Registrar venda", command=self.registrar_venda)
+        self.btn_salvar_venda.pack(side="left", padx=5)
+        ttk.Button(barra_botoes, text="Editar selecionada", command=self.carregar_venda_para_edicao).pack(side="left", padx=5)
+        ttk.Button(barra_botoes, text="Excluir selecionada", command=self.excluir_venda).pack(side="left", padx=5)
+        ttk.Button(barra_botoes, text="Cancelar edição", command=self.cancelar_edicao_venda).pack(side="left", padx=5)
+
+        self.tree_vendas = ttk.Treeview(
+            self.tab_vendas,
+            columns=("id", "produto", "quantidade", "total", "custo", "lucro", "data"),
+            show="headings"
+        )
+        for col, txt, w in [
+            ("id", "ID", 60),
+            ("produto", "Produto", 220),
+            ("quantidade", "Qtd", 70),
+            ("total", "Faturamento (R$)", 130),
+            ("custo", "Custo (R$)", 120),
+            ("lucro", "Lucro (R$)", 120),
+            ("data", "Data", 180),
+        ]:
+            self.tree_vendas.heading(col, text=txt)
+            self.tree_vendas.column(col, width=w)
+
+        self.tree_vendas.pack(fill="both", expand=True, padx=10, pady=10)
+        self.tree_vendas.bind("<Double-1>", lambda e: self.carregar_venda_para_edicao())
+
+    def montar_tab_relatorio(self):
+        frame = ttk.Frame(self.tab_relatorio, padding=10)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Button(frame, text="Atualizar relatório", command=self.gerar_relatorio).pack(anchor="w", pady=5)
+
+        self.txt_relatorio = tk.Text(frame, height=30, wrap="word")
+        self.txt_relatorio.pack(fill="both", expand=True)
+
+    def validar_texto_obrigatorio(self, valor, nome_campo):
+        if not str(valor).strip():
+            raise ValueError(f"Informe {nome_campo}.")
+
+    def validar_numero_nao_negativo(self, valor, nome_campo):
+        if valor < 0:
+            raise ValueError(f"O campo '{nome_campo}' não pode ser negativo.")
+
+    def validar_numero_positivo(self, valor, nome_campo):
+        if valor <= 0:
+            raise ValueError(f"O campo '{nome_campo}' deve ser maior que zero.")
+
+    def alternar_campos_material(self, event=None):
+        categoria = self.mat_categoria.get()
+
+        if categoria == "Filamentos":
+            self.frame_filamento.grid()
+            self.lbl_peso_rolo.grid()
+            self.entry_peso_rolo.grid()
+            self.lbl_valor_rolo.grid()
+            self.entry_valor_rolo.grid()
+            self.lbl_custo_unitario.grid_remove()
+            self.entry_custo_unitario.grid_remove()
+            self.lbl_unidade.grid_remove()
+            self.entry_unidade.grid_remove()
+        else:
+            self.frame_filamento.grid_remove()
+            self.lbl_peso_rolo.grid_remove()
+            self.entry_peso_rolo.grid_remove()
+            self.lbl_valor_rolo.grid_remove()
+            self.entry_valor_rolo.grid_remove()
+            self.lbl_custo_unitario.grid(row=5, column=0, sticky="w", padx=5, pady=5)
+            self.entry_custo_unitario.grid(row=5, column=1, padx=5, pady=5)
+            self.lbl_unidade.grid(row=6, column=0, sticky="w", padx=5, pady=5)
+            self.entry_unidade.grid(row=6, column=1, padx=5, pady=5)
+
+    def obter_impressora_selecionada_id(self):
+        selecionado = self.tree_impressoras.selection()
+        if not selecionado:
+            messagebox.showwarning("Aviso", "Selecione uma impressora na tabela.")
+            return None
+        return int(self.tree_impressoras.item(selecionado[0], "values")[0])
+
+    def obter_material_selecionado_id(self):
+        selecionado = self.tree_materiais.selection()
+        if not selecionado:
+            messagebox.showwarning("Aviso", "Selecione um material na tabela.")
+            return None
+        return int(self.tree_materiais.item(selecionado[0], "values")[0])
+
+    def obter_produto_selecionado_id(self):
+        selecionado = self.tree_produtos.selection()
+        if not selecionado:
+            messagebox.showwarning("Aviso", "Selecione um produto na tabela.")
+            return None
+        return int(self.tree_produtos.item(selecionado[0], "values")[0])
+
+    def obter_venda_selecionada_id(self):
+        selecionado = self.tree_vendas.selection()
+        if not selecionado:
+            messagebox.showwarning("Aviso", "Selecione uma venda na tabela.")
+            return None
+        return int(self.tree_vendas.item(selecionado[0], "values")[0])
+
+    def salvar_impressora(self):
+        try:
+            self.validar_texto_obrigatorio(self.imp_nome.get(), "o nome da impressora")
+            self.validar_numero_positivo(self.imp_potencia.get(), "Potência (W)")
+            self.validar_numero_nao_negativo(self.imp_custo.get(), "Custo aquisição")
+            self.validar_numero_nao_negativo(self.imp_vida.get(), "Vida útil")
+            self.validar_numero_nao_negativo(self.imp_manut.get(), "Manutenção mensal")
+
+            params = (
+                self.imp_nome.get().strip(),
+                self.imp_potencia.get(),
+                self.imp_custo.get(),
+                self.imp_vida.get(),
+                self.imp_manut.get()
+            )
+
+            if self.impressora_editando_id is None:
+                self.db.execute("""
+                    INSERT INTO impressoras (nome, potencia_w, custo_aquisicao, vida_util_horas, manutencao_mensal)
+                    VALUES (?, ?, ?, ?, ?)
+                """, params)
+                messagebox.showinfo("Sucesso", "Impressora cadastrada com sucesso.")
+            else:
+                self.db.execute("""
+                    UPDATE impressoras
+                    SET nome = ?, potencia_w = ?, custo_aquisicao = ?, vida_util_horas = ?, manutencao_mensal = ?
+                    WHERE id = ?
+                """, params + (self.impressora_editando_id,))
+                self.atualizar_precos_produtos_por_impressora(self.impressora_editando_id)
+                messagebox.showinfo("Sucesso", "Impressora atualizada com sucesso.")
+
+            self.cancelar_edicao_impressora()
+            self.atualizar_listas()
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao salvar impressora:\n{e}")
+
+    def carregar_impressora_para_edicao(self):
+        impressora_id = self.obter_impressora_selecionada_id()
+        if impressora_id is None:
+            return
+
+        row = self.db.execute("SELECT * FROM impressoras WHERE id = ?", (impressora_id,), fetchone=True)
+        if not row:
+            return
+
+        self.impressora_editando_id = impressora_id
+        self.imp_nome.set(row["nome"] or "")
+        self.imp_potencia.set(row["potencia_w"] or 0.0)
+        self.imp_custo.set(row["custo_aquisicao"] or 0.0)
+        self.imp_vida.set(row["vida_util_horas"] or 0.0)
+        self.imp_manut.set(row["manutencao_mensal"] or 0.0)
+        self.btn_salvar_impressora.config(text="Atualizar impressora")
+
+    def cancelar_edicao_impressora(self):
+        self.impressora_editando_id = None
+        self.btn_salvar_impressora.config(text="Salvar impressora")
+        self.limpar_campos_impressora()
+
+    def excluir_impressora(self):
+        impressora_id = self.obter_impressora_selecionada_id()
+        if impressora_id is None:
+            return
+
+        uso = self.db.execute("SELECT COUNT(*) AS qtd FROM produtos WHERE impressora_id = ?", (impressora_id,), fetchone=True)
+        if uso and uso["qtd"] > 0:
+            messagebox.showerror("Erro", "Esta impressora está vinculada a produtos e não pode ser excluída.")
+            return
+
+        if not messagebox.askyesno("Confirmar", "Deseja realmente excluir a impressora selecionada?"):
+            return
+
+        self.db.execute("DELETE FROM impressoras WHERE id = ?", (impressora_id,))
+        self.cancelar_edicao_impressora()
+        self.atualizar_listas()
+        messagebox.showinfo("Sucesso", "Impressora excluída com sucesso.")
+
+    def salvar_material(self):
+        try:
+            categoria = self.mat_categoria.get()
+
+            if not self.mat_nome.get().strip():
+                raise ValueError("Informe o nome do material.")
+            if not categoria:
+                raise ValueError("Selecione a categoria do material.")
+
+            if categoria == "Filamentos":
+                self.validar_numero_positivo(self.mat_peso_rolo.get(), "Peso do rolo")
+                self.validar_numero_positivo(self.mat_valor_rolo.get(), "Valor do rolo")
+
+                params = (
+                    self.mat_nome.get().strip(),
+                    categoria,
+                    self.mat_fabricante.get().strip(),
+                    self.mat_tipo.get().strip(),
+                    self.mat_cor.get().strip(),
+                    self.mat_peso_rolo.get(),
+                    self.mat_valor_rolo.get(),
+                    0,
+                    "g"
+                )
+            else:
+                self.validar_numero_positivo(self.mat_custo_unitario.get(), "Custo unitário")
+                if not self.mat_unidade.get().strip():
+                    raise ValueError("Informe a unidade do insumo, ex: un, ml, m, kg.")
+
+                params = (
+                    self.mat_nome.get().strip(),
+                    categoria,
+                    "",
+                    "",
+                    "",
+                    0,
+                    0,
+                    self.mat_custo_unitario.get(),
+                    self.mat_unidade.get().strip()
+                )
+
+            if self.material_editando_id is None:
+                self.db.execute("""
+                    INSERT INTO materiais
+                    (nome, categoria, fabricante, tipo, cor, peso_rolo_g, valor_rolo, custo_unitario, unidade)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, params)
+                messagebox.showinfo("Sucesso", "Material salvo com sucesso.")
+            else:
+                uso = self.db.execute("SELECT COUNT(*) AS qtd FROM produtos WHERE material_id = ?", (self.material_editando_id,), fetchone=True)
+                self.db.execute("""
+                    UPDATE materiais
+                    SET nome = ?, categoria = ?, fabricante = ?, tipo = ?, cor = ?,
+                        peso_rolo_g = ?, valor_rolo = ?, custo_unitario = ?, unidade = ?
+                    WHERE id = ?
+                """, params + (self.material_editando_id,))
+                messagebox.showinfo("Sucesso", "Material atualizado com sucesso.")
+                if uso and uso["qtd"] > 0:
+                    self.atualizar_precos_produtos_por_material(self.material_editando_id)
+
+            self.cancelar_edicao_material()
+            self.atualizar_listas()
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao salvar material:\n{e}")
+
+    def carregar_material_para_edicao(self):
+        material_id = self.obter_material_selecionado_id()
+        if material_id is None:
+            return
+
+        row = self.db.execute("SELECT * FROM materiais WHERE id = ?", (material_id,), fetchone=True)
+        if not row:
+            return
+
+        self.material_editando_id = material_id
+        self.mat_nome.set(row["nome"] or "")
+        self.mat_categoria.set(row["categoria"] or "")
+        self.mat_fabricante.set(row["fabricante"] or "")
+        self.mat_tipo.set(row["tipo"] or "")
+        self.mat_cor.set(row["cor"] or "")
+        self.mat_peso_rolo.set(row["peso_rolo_g"] or 0.0)
+        self.mat_valor_rolo.set(row["valor_rolo"] or 0.0)
+        self.mat_custo_unitario.set(row["custo_unitario"] or 0.0)
+        self.mat_unidade.set(row["unidade"] or "")
+        self.alternar_campos_material()
+        self.btn_salvar_material.config(text="Atualizar material")
+
+    def cancelar_edicao_material(self):
+        self.material_editando_id = None
+        self.btn_salvar_material.config(text="Salvar material")
+        self.limpar_campos_material()
+
+    def excluir_material(self):
+        material_id = self.obter_material_selecionado_id()
+        if material_id is None:
+            return
+
+        uso = self.db.execute("SELECT COUNT(*) AS qtd FROM produtos WHERE material_id = ?", (material_id,), fetchone=True)
+        if uso and uso["qtd"] > 0:
+            messagebox.showerror("Erro", "Este material está vinculado a produtos e não pode ser excluído.")
+            return
+
+        if not messagebox.askyesno("Confirmar", "Deseja realmente excluir o material selecionado?"):
+            return
+
+        self.db.execute("DELETE FROM materiais WHERE id = ?", (material_id,))
+        self.cancelar_edicao_material()
+        self.atualizar_listas()
+        messagebox.showinfo("Sucesso", "Material excluído com sucesso.")
+
+    def custo_grama_material(self, material_id):
+        mat = self.db.execute("SELECT * FROM materiais WHERE id = ?", (material_id,), fetchone=True)
+        if not mat:
+            return 0
+        if mat["categoria"] == "Filamentos" and mat["peso_rolo_g"] > 0:
+            return mat["valor_rolo"] / mat["peso_rolo_g"]
+        return 0
+
+    def custo_hora_impressora(self, impressora_id):
+        imp = self.db.execute("SELECT * FROM impressoras WHERE id = ?", (impressora_id,), fetchone=True)
+        if not imp:
+            return 0
+
+        energia_kwh_hora = imp["potencia_w"] / 1000
+        custo_energia_hora = energia_kwh_hora * self.tarifa_energia.get()
+
+        depreciacao_hora = 0
+        if imp["vida_util_horas"] and imp["vida_util_horas"] > 0:
+            depreciacao_hora = imp["custo_aquisicao"] / imp["vida_util_horas"]
+
+        manutencao_hora = imp["manutencao_mensal"] / 160 if imp["manutencao_mensal"] else 0
+        return custo_energia_hora + depreciacao_hora + manutencao_hora
+
+    def calcular_preco(self, material_id, impressora_id, peso_g, tempo_h, insumos_extra, mao_obra, falha_pct, margem_pct):
+        custo_material = self.custo_grama_material(material_id) * peso_g
+        custo_impressao = self.custo_hora_impressora(impressora_id) * tempo_h
+        subtotal = custo_material + custo_impressao + insumos_extra + mao_obra
+        adicional_fixos = subtotal * (self.percentual_custos_fixos.get() / 100)
+        subtotal += adicional_fixos
+        fator_falha = 1 + (falha_pct / 100)
+        custo_total = subtotal * fator_falha
+        preco_sugerido = custo_total * (1 + margem_pct / 100)
+
+        return {
+            "custo_material": custo_material,
+            "custo_impressao": custo_impressao,
+            "custos_fixos": adicional_fixos,
+            "custo_total": custo_total,
+            "preco_sugerido": preco_sugerido
+        }
+
+    def calcular_preco_produto(self):
+        try:
+            if not self.prod_material.get():
+                raise ValueError("Selecione um filamento.")
+            if not self.prod_impressora.get():
+                raise ValueError("Selecione uma impressora.")
+
+            self.validar_numero_positivo(self.prod_peso.get(), "Peso da peça")
+            self.validar_numero_positivo(self.prod_tempo.get(), "Tempo de impressão")
+            self.validar_numero_nao_negativo(self.prod_insumos.get(), "Insumos extras")
+            self.validar_numero_nao_negativo(self.prod_mao_obra.get(), "Mão de obra")
+            self.validar_numero_nao_negativo(self.prod_falha.get(), "% perda/falha")
+            self.validar_numero_nao_negativo(self.prod_margem.get(), "% margem de lucro")
+
+            material_id = int(self.prod_material.get().split(" - ")[0])
+            impressora_id = int(self.prod_impressora.get().split(" - ")[0])
+
+            dados = self.calcular_preco(
+                material_id=material_id,
+                impressora_id=impressora_id,
+                peso_g=self.prod_peso.get(),
+                tempo_h=self.prod_tempo.get(),
+                insumos_extra=self.prod_insumos.get(),
+                mao_obra=self.prod_mao_obra.get(),
+                falha_pct=self.prod_falha.get(),
+                margem_pct=self.prod_margem.get()
+            )
+
+            self.lbl_preco.config(
+                text=f"Preço sugerido: R$ {dados['preco_sugerido']:.2f} | Custo total: R$ {dados['custo_total']:.2f}"
+            )
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao calcular preço:\n{e}")
+
+    def salvar_produto(self):
+        try:
+            self.validar_texto_obrigatorio(self.prod_nome.get(), "o nome do produto")
+
+            if not self.prod_material.get():
+                raise ValueError("Selecione um filamento.")
+            if not self.prod_impressora.get():
+                raise ValueError("Selecione uma impressora.")
+
+            self.validar_numero_positivo(self.prod_peso.get(), "Peso da peça")
+            self.validar_numero_positivo(self.prod_tempo.get(), "Tempo de impressão")
+            self.validar_numero_nao_negativo(self.prod_insumos.get(), "Insumos extras")
+            self.validar_numero_nao_negativo(self.prod_mao_obra.get(), "Mão de obra")
+            self.validar_numero_nao_negativo(self.prod_falha.get(), "% perda/falha")
+            self.validar_numero_nao_negativo(self.prod_margem.get(), "% margem de lucro")
+
+            material_id = int(self.prod_material.get().split(" - ")[0])
+            impressora_id = int(self.prod_impressora.get().split(" - ")[0])
+
+            dados = self.calcular_preco(
+                material_id=material_id,
+                impressora_id=impressora_id,
+                peso_g=self.prod_peso.get(),
+                tempo_h=self.prod_tempo.get(),
+                insumos_extra=self.prod_insumos.get(),
+                mao_obra=self.prod_mao_obra.get(),
+                falha_pct=self.prod_falha.get(),
+                margem_pct=self.prod_margem.get()
+            )
+
+            params = (
+                self.prod_nome.get().strip(),
+                material_id,
+                impressora_id,
+                self.prod_peso.get(),
+                self.prod_tempo.get(),
+                self.prod_insumos.get(),
+                self.prod_mao_obra.get(),
+                self.prod_falha.get(),
+                self.prod_margem.get(),
+                dados["preco_sugerido"]
+            )
+
+            if self.produto_editando_id is None:
+                self.db.execute("""
+                    INSERT INTO produtos (
+                        nome, material_id, impressora_id, peso_peca_g, tempo_impressao_h,
+                        custo_insumos_extra, custo_mao_obra, percentual_falha, margem_lucro, preco_sugerido
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, params)
+                messagebox.showinfo("Sucesso", "Produto salvo com sucesso.")
+            else:
+                self.db.execute("""
+                    UPDATE produtos
+                    SET nome = ?, material_id = ?, impressora_id = ?, peso_peca_g = ?, tempo_impressao_h = ?,
+                        custo_insumos_extra = ?, custo_mao_obra = ?, percentual_falha = ?, margem_lucro = ?, preco_sugerido = ?
+                    WHERE id = ?
+                """, params + (self.produto_editando_id,))
+                messagebox.showinfo("Sucesso", "Produto atualizado com sucesso.")
+
+            self.cancelar_edicao_produto()
+            self.atualizar_listas()
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao salvar produto:\n{e}")
+
+    def carregar_produto_para_edicao(self):
+        produto_id = self.obter_produto_selecionado_id()
+        if produto_id is None:
+            return
+
+        row = self.db.execute("SELECT * FROM produtos WHERE id = ?", (produto_id,), fetchone=True)
+        if not row:
+            return
+
+        self.produto_editando_id = produto_id
+        self.prod_nome.set(row["nome"] or "")
+        self.prod_material.set(self.formatar_material_combobox_por_id(row["material_id"]))
+        self.prod_impressora.set(self.formatar_impressora_combobox_por_id(row["impressora_id"]))
+        self.prod_peso.set(row["peso_peca_g"] or 0.0)
+        self.prod_tempo.set(row["tempo_impressao_h"] or 0.0)
+        self.prod_insumos.set(row["custo_insumos_extra"] or 0.0)
+        self.prod_mao_obra.set(row["custo_mao_obra"] or 0.0)
+        self.prod_falha.set(row["percentual_falha"] or 0.0)
+        self.prod_margem.set(row["margem_lucro"] or 0.0)
+        self.lbl_preco.config(text=f"Preço sugerido atual: R$ {row['preco_sugerido']:.2f}")
+        self.btn_salvar_produto.config(text="Atualizar produto")
+
+    def cancelar_edicao_produto(self):
+        self.produto_editando_id = None
+        self.btn_salvar_produto.config(text="Salvar produto")
+        self.limpar_campos_produto()
+
+    def excluir_produto(self):
+        produto_id = self.obter_produto_selecionado_id()
+        if produto_id is None:
+            return
+
+        uso = self.db.execute("SELECT COUNT(*) AS qtd FROM vendas WHERE produto_id = ?", (produto_id,), fetchone=True)
+        if uso and uso["qtd"] > 0:
+            messagebox.showerror("Erro", "Este produto possui vendas registradas e não pode ser excluído.")
+            return
+
+        if not messagebox.askyesno("Confirmar", "Deseja realmente excluir o produto selecionado?"):
+            return
+
+        self.db.execute("DELETE FROM produtos WHERE id = ?", (produto_id,))
+        self.cancelar_edicao_produto()
+        self.atualizar_listas()
+        messagebox.showinfo("Sucesso", "Produto excluído com sucesso.")
+
+    def registrar_venda(self):
+        try:
+            if not self.venda_produto.get():
+                raise ValueError("Selecione um produto.")
+
+            produto_id = int(self.venda_produto.get().split(" - ")[0])
+            qtd = self.venda_quantidade.get()
+            valor_unit = self.venda_valor_unitario.get()
+
+            self.validar_numero_positivo(qtd, "Quantidade")
+            self.validar_numero_positivo(valor_unit, "Valor unitário vendido")
+
+            produto = self.db.execute("SELECT * FROM produtos WHERE id = ?", (produto_id,), fetchone=True)
+            if not produto:
+                raise ValueError("Produto não encontrado.")
+
+            dados_custo = self.calcular_preco(
+                material_id=produto["material_id"],
+                impressora_id=produto["impressora_id"],
+                peso_g=produto["peso_peca_g"],
+                tempo_h=produto["tempo_impressao_h"],
+                insumos_extra=produto["custo_insumos_extra"],
+                mao_obra=produto["custo_mao_obra"],
+                falha_pct=produto["percentual_falha"],
+                margem_pct=produto["margem_lucro"]
+            )
+
+            custo_unitario = dados_custo["custo_total"]
+            custo_total_venda = custo_unitario * qtd
+            valor_total = qtd * valor_unit
+            lucro_total = valor_total - custo_total_venda
+
+            if self.venda_editando_id is None:
+                self.db.execute("""
+                    INSERT INTO vendas (
+                        produto_id, quantidade, valor_unitario, valor_total,
+                        custo_unitario_produto, custo_total_venda, lucro_total
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (produto_id, qtd, valor_unit, valor_total, custo_unitario, custo_total_venda, lucro_total))
+                messagebox.showinfo("Sucesso", "Venda registrada com sucesso.")
+            else:
+                self.db.execute("""
+                    UPDATE vendas
+                    SET produto_id = ?, quantidade = ?, valor_unitario = ?, valor_total = ?,
+                        custo_unitario_produto = ?, custo_total_venda = ?, lucro_total = ?
+                    WHERE id = ?
+                """, (produto_id, qtd, valor_unit, valor_total, custo_unitario, custo_total_venda, lucro_total, self.venda_editando_id))
+                messagebox.showinfo("Sucesso", "Venda atualizada com sucesso.")
+
+            self.cancelar_edicao_venda()
+            self.atualizar_listas()
+            self.gerar_relatorio()
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Erro ao registrar venda:\n{e}")
+
+    def carregar_venda_para_edicao(self):
+        venda_id = self.obter_venda_selecionada_id()
+        if venda_id is None:
+            return
+
+        row = self.db.execute("SELECT * FROM vendas WHERE id = ?", (venda_id,), fetchone=True)
+        if not row:
+            return
+
+        self.venda_editando_id = venda_id
+        self.venda_produto.set(self.formatar_produto_combobox_por_id(row["produto_id"]))
+        self.venda_quantidade.set(row["quantidade"] or 1)
+        self.venda_valor_unitario.set(row["valor_unitario"] or 0.0)
+        self.btn_salvar_venda.config(text="Atualizar venda")
+
+    def cancelar_edicao_venda(self):
+        self.venda_editando_id = None
+        self.btn_salvar_venda.config(text="Registrar venda")
+        self.venda_produto.set("")
+        self.venda_quantidade.set(1)
+        self.venda_valor_unitario.set(0.0)
+
+    def excluir_venda(self):
+        venda_id = self.obter_venda_selecionada_id()
+        if venda_id is None:
+            return
+
+        if not messagebox.askyesno("Confirmar", "Deseja realmente excluir a venda selecionada?"):
+            return
+
+        self.db.execute("DELETE FROM vendas WHERE id = ?", (venda_id,))
+        self.cancelar_edicao_venda()
+        self.atualizar_listas()
+        self.gerar_relatorio()
+        messagebox.showinfo("Sucesso", "Venda excluída com sucesso.")
+
+    def atualizar_precos_produtos_por_material(self, material_id):
+        produtos = self.db.execute("SELECT * FROM produtos WHERE material_id = ?", (material_id,), fetch=True)
+        for row in produtos:
+            dados = self.calcular_preco(
+                material_id=row["material_id"],
+                impressora_id=row["impressora_id"],
+                peso_g=row["peso_peca_g"],
+                tempo_h=row["tempo_impressao_h"],
+                insumos_extra=row["custo_insumos_extra"],
+                mao_obra=row["custo_mao_obra"],
+                falha_pct=row["percentual_falha"],
+                margem_pct=row["margem_lucro"]
+            )
+            self.db.execute("UPDATE produtos SET preco_sugerido = ? WHERE id = ?", (dados["preco_sugerido"], row["id"]))
+
+    def atualizar_precos_produtos_por_impressora(self, impressora_id):
+        produtos = self.db.execute("SELECT * FROM produtos WHERE impressora_id = ?", (impressora_id,), fetch=True)
+        for row in produtos:
+            dados = self.calcular_preco(
+                material_id=row["material_id"],
+                impressora_id=row["impressora_id"],
+                peso_g=row["peso_peca_g"],
+                tempo_h=row["tempo_impressao_h"],
+                insumos_extra=row["custo_insumos_extra"],
+                mao_obra=row["custo_mao_obra"],
+                falha_pct=row["percentual_falha"],
+                margem_pct=row["margem_lucro"]
+            )
+            self.db.execute("UPDATE produtos SET preco_sugerido = ? WHERE id = ?", (dados["preco_sugerido"], row["id"]))
+
+    def gerar_relatorio(self):
+        resumo = self.db.execute("""
+            SELECT
+                COUNT(*) AS qtd_vendas,
+                COALESCE(SUM(valor_total), 0) AS faturamento_total,
+                COALESCE(SUM(custo_total_venda), 0) AS custo_total,
+                COALESCE(SUM(lucro_total), 0) AS lucro_total
+            FROM vendas
+        """, fetchone=True)
+
+        produtos = self.db.execute("SELECT COUNT(*) AS qtd FROM produtos", fetchone=True)
+        materiais = self.db.execute("SELECT COUNT(*) AS qtd FROM materiais", fetchone=True)
+        impressoras = self.db.execute("SELECT COUNT(*) AS qtd FROM impressoras", fetchone=True)
+
+        ranking_faturamento = self.db.execute("""
+            SELECT
+                p.nome,
+                SUM(v.quantidade) AS qtd_total,
+                SUM(v.valor_total) AS faturamento,
+                SUM(v.lucro_total) AS lucro
+            FROM vendas v
+            JOIN produtos p ON p.id = v.produto_id
+            GROUP BY p.id, p.nome
+            ORDER BY faturamento DESC
+            LIMIT 10
+        """, fetch=True)
+
+        ranking_lucro = self.db.execute("""
+            SELECT
+                p.nome,
+                SUM(v.lucro_total) AS lucro,
+                SUM(v.valor_total) AS faturamento
+            FROM vendas v
+            JOIN produtos p ON p.id = v.produto_id
+            GROUP BY p.id, p.nome
+            ORDER BY lucro DESC
+            LIMIT 10
+        """, fetch=True)
+
+        produto_mais_lucrativo = self.db.execute("""
+            SELECT
+                p.nome,
+                SUM(v.lucro_total) AS lucro
+            FROM vendas v
+            JOIN produtos p ON p.id = v.produto_id
+            GROUP BY p.id, p.nome
+            ORDER BY lucro DESC
+            LIMIT 1
+        """, fetchone=True)
+
+        ticket_medio = 0
+        if resumo["qtd_vendas"] > 0:
+            ticket_medio = resumo["faturamento_total"] / resumo["qtd_vendas"]
+
+        margem_real = 0
+        if resumo["faturamento_total"] > 0:
+            margem_real = (resumo["lucro_total"] / resumo["faturamento_total"]) * 100
+
+        texto = []
+        texto.append("RELATÓRIO GERENCIAL DO NEGÓCIO DE IMPRESSÃO 3D\n")
+        texto.append(f"Faturamento total: R$ {resumo['faturamento_total']:.2f}")
+        texto.append(f"Custo total estimado das vendas: R$ {resumo['custo_total']:.2f}")
+        texto.append(f"Lucro estimado total: R$ {resumo['lucro_total']:.2f}")
+        texto.append(f"Quantidade de vendas registradas: {resumo['qtd_vendas']}")
+        texto.append(f"Ticket médio por venda: R$ {ticket_medio:.2f}")
+        texto.append(f"Margem real estimada: {margem_real:.2f}%\n")
+
+        texto.append(f"Produtos cadastrados: {produtos['qtd']}")
+        texto.append(f"Materiais cadastrados: {materiais['qtd']}")
+        texto.append(f"Impressoras cadastradas: {impressoras['qtd']}\n")
+
+        if produto_mais_lucrativo:
+            texto.append(f"Produto mais lucrativo: {produto_mais_lucrativo['nome']} | Lucro acumulado: R$ {produto_mais_lucrativo['lucro']:.2f}\n")
+        else:
+            texto.append("Produto mais lucrativo: ainda não há vendas registradas.\n")
+
+        texto.append("RANKING DE PRODUTOS POR FATURAMENTO:")
+        if ranking_faturamento:
+            for i, item in enumerate(ranking_faturamento, start=1):
+                texto.append(
+                    f"{i}. {item['nome']} | Qtd: {item['qtd_total']} | "
+                    f"Faturamento: R$ {item['faturamento']:.2f} | Lucro: R$ {(item['lucro'] or 0):.2f}"
+                )
+        else:
+            texto.append("Nenhuma venda registrada ainda.")
+
+        texto.append("\nRANKING DE PRODUTOS POR LUCRO:")
+        if ranking_lucro:
+            for i, item in enumerate(ranking_lucro, start=1):
+                texto.append(
+                    f"{i}. {item['nome']} | Lucro: R$ {(item['lucro'] or 0):.2f} | "
+                    f"Faturamento: R$ {(item['faturamento'] or 0):.2f}"
+                )
+        else:
+            texto.append("Nenhuma venda registrada ainda.")
+
+        self.txt_relatorio.delete("1.0", tk.END)
+        self.txt_relatorio.insert(tk.END, "\n".join(texto))
+
+    def atualizar_listas(self):
+        self.atualizar_tree_impressoras()
+        self.atualizar_tree_materiais()
+        self.atualizar_tree_produtos()
+        self.atualizar_tree_vendas()
+        self.atualizar_comboboxes()
+        self.gerar_relatorio()
+
+    def atualizar_tree_impressoras(self):
+        for item in self.tree_impressoras.get_children():
+            self.tree_impressoras.delete(item)
+
+        dados = self.db.execute("SELECT * FROM impressoras ORDER BY id DESC", fetch=True)
+        for row in dados:
+            self.tree_impressoras.insert("", tk.END, values=(
+                row["id"],
+                row["nome"],
+                row["potencia_w"],
+                f"{row['custo_aquisicao']:.2f}",
+                f"{row['vida_util_horas']:.2f}",
+                f"{row['manutencao_mensal']:.2f}"
+            ))
+
+    def atualizar_tree_materiais(self):
+        for item in self.tree_materiais.get_children():
+            self.tree_materiais.delete(item)
+
+        dados = self.db.execute("SELECT * FROM materiais ORDER BY id DESC", fetch=True)
+        for row in dados:
+            if row["categoria"] == "Filamentos" and row["peso_rolo_g"]:
+                custo = row["valor_rolo"] / row["peso_rolo_g"]
+                custo_texto = f"R$ {custo:.4f}/g"
+            else:
+                unidade = row["unidade"] if row["unidade"] else "un"
+                custo_texto = f"R$ {row['custo_unitario']:.2f}/{unidade}"
+
+            self.tree_materiais.insert("", tk.END, values=(
+                row["id"],
+                row["nome"],
+                row["categoria"] or "-",
+                row["fabricante"] or "-",
+                row["tipo"] or "-",
+                row["cor"] or "-",
+                custo_texto
+            ))
+
+    def atualizar_tree_produtos(self):
+        for item in self.tree_produtos.get_children():
+            self.tree_produtos.delete(item)
+
+        dados = self.db.execute("SELECT * FROM produtos ORDER BY id DESC", fetch=True)
+        for row in dados:
+            self.tree_produtos.insert("", tk.END, values=(
+                row["id"],
+                row["nome"],
+                f"{row['preco_sugerido']:.2f}",
+                row["peso_peca_g"],
+                row["tempo_impressao_h"]
+            ))
+
+    def atualizar_tree_vendas(self):
+        for item in self.tree_vendas.get_children():
+            self.tree_vendas.delete(item)
+
+        dados = self.db.execute("""
+            SELECT v.id, p.nome AS produto, v.quantidade, v.valor_total,
+                   v.custo_total_venda, v.lucro_total, v.data_venda
+            FROM vendas v
+            JOIN produtos p ON p.id = v.produto_id
+            ORDER BY v.id DESC
+        """, fetch=True)
+
+        for row in dados:
+            self.tree_vendas.insert("", tk.END, values=(
+                row["id"],
+                row["produto"],
+                row["quantidade"],
+                f"{(row['valor_total'] or 0):.2f}",
+                f"{(row['custo_total_venda'] or 0):.2f}",
+                f"{(row['lucro_total'] or 0):.2f}",
+                row["data_venda"]
+            ))
+
+    def atualizar_comboboxes(self):
+        materiais = self.db.execute("""
+            SELECT id, nome, fabricante, tipo, cor
+            FROM materiais
+            WHERE categoria = 'Filamentos'
+            ORDER BY nome
+        """, fetch=True)
+        impressoras = self.db.execute("SELECT id, nome FROM impressoras ORDER BY nome", fetch=True)
+        produtos = self.db.execute("SELECT id, nome, preco_sugerido FROM produtos ORDER BY nome", fetch=True)
+
+        lista_materiais = []
+        for m in materiais:
+            detalhes = " | ".join([x for x in [m["fabricante"], m["tipo"], m["cor"]] if x])
+            if detalhes:
+                lista_materiais.append(f"{m['id']} - {m['nome']} ({detalhes})")
+            else:
+                lista_materiais.append(f"{m['id']} - {m['nome']}")
+
+        self.prod_material["values"] = lista_materiais
+        self.prod_impressora["values"] = [f"{i['id']} - {i['nome']}" for i in impressoras]
+        self.venda_produto["values"] = [f"{p['id']} - {p['nome']} (R$ {p['preco_sugerido']:.2f})" for p in produtos]
+
+    def formatar_material_combobox_por_id(self, material_id):
+        m = self.db.execute("SELECT id, nome, fabricante, tipo, cor FROM materiais WHERE id = ?", (material_id,), fetchone=True)
+        if not m:
+            return ""
+        detalhes = " | ".join([x for x in [m["fabricante"], m["tipo"], m["cor"]] if x])
+        return f"{m['id']} - {m['nome']} ({detalhes})" if detalhes else f"{m['id']} - {m['nome']}"
+
+    def formatar_impressora_combobox_por_id(self, impressora_id):
+        i = self.db.execute("SELECT id, nome FROM impressoras WHERE id = ?", (impressora_id,), fetchone=True)
+        if not i:
+            return ""
+        return f"{i['id']} - {i['nome']}"
+
+    def formatar_produto_combobox_por_id(self, produto_id):
+        p = self.db.execute("SELECT id, nome, preco_sugerido FROM produtos WHERE id = ?", (produto_id,), fetchone=True)
+        if not p:
+            return ""
+        return f"{p['id']} - {p['nome']} (R$ {p['preco_sugerido']:.2f})"
+
+    def limpar_campos_impressora(self):
+        self.imp_nome.set("")
+        self.imp_potencia.set(0.0)
+        self.imp_custo.set(0.0)
+        self.imp_vida.set(0.0)
+        self.imp_manut.set(0.0)
+
+    def limpar_campos_material(self):
+        self.mat_nome.set("")
+        self.mat_categoria.set("")
+        self.mat_fabricante.set("")
+        self.mat_tipo.set("")
+        self.mat_cor.set("")
+        self.mat_peso_rolo.set(0.0)
+        self.mat_valor_rolo.set(0.0)
+        self.mat_custo_unitario.set(0.0)
+        self.mat_unidade.set("")
+        self.alternar_campos_material()
+
+    def limpar_campos_produto(self):
+        self.prod_nome.set("")
+        self.prod_material.set("")
+        self.prod_impressora.set("")
+        self.prod_peso.set(0.0)
+        self.prod_tempo.set(0.0)
+        self.prod_insumos.set(0.0)
+        self.prod_mao_obra.set(0.0)
+        self.prod_falha.set(5.0)
+        self.prod_margem.set(30.0)
+        self.lbl_preco.config(text="Preço sugerido: R$ 0,00")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = Sistema3DApp(root)
+    root.mainloop()
